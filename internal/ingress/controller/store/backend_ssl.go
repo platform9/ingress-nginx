@@ -40,6 +40,7 @@ func (s k8sStore) syncSecret(key string) {
 	defer s.mu.Unlock()
 
 	glog.V(3).Infof("Syncing Secret %q", key)
+	glog.Infof("Syncing secret: %s", key)
 
 	// TODO: getPemCertificate should not write to disk to avoid unnecessary overhead
 	cert, err := s.getPemCertificate(key)
@@ -53,10 +54,12 @@ func (s k8sStore) syncSecret(key string) {
 	// create certificates and add or update the item in the store
 	cur, err := s.GetLocalSSLCert(key)
 	if err == nil {
-		if cur.Equal(cert) {
+		eq, reason := cur.Equal(cert)
+		if eq {
 			// no need to update
 			return
 		}
+		glog.Infof("Store copy of secret %q differs: %s", key, reason)
 		glog.Infof("Updating Secret %q in the local store", key)
 		s.sslStore.Update(key, cert)
 		// this update must trigger an update

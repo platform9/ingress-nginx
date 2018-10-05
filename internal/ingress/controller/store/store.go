@@ -283,7 +283,7 @@ func New(checkOCSP bool,
 
 			store.extractAnnotations(ing)
 			store.updateSecretIngressMap(ing)
-			store.syncSecrets(ing)
+			store.syncSecrets(ing, "ingress added")
 
 			updateCh.In() <- Event{
 				Type: CreateEvent,
@@ -338,7 +338,7 @@ func New(checkOCSP bool,
 
 			store.extractAnnotations(curIng)
 			store.updateSecretIngressMap(curIng)
-			store.syncSecrets(curIng)
+			store.syncSecrets(curIng, "ingress updated")
 
 			updateCh.In() <- Event{
 				Type: UpdateEvent,
@@ -351,6 +351,7 @@ func New(checkOCSP bool,
 		AddFunc: func(obj interface{}) {
 			sec := obj.(*corev1.Secret)
 			key := k8s.MetaNamespaceKey(sec)
+			glog.Infof("secret %v was added", key)
 
 			if store.defaultSSLCertificate == key {
 				store.syncSecret(store.defaultSSLCertificate)
@@ -366,7 +367,7 @@ func New(checkOCSP bool,
 						continue
 					}
 					store.extractAnnotations(ing)
-					store.syncSecrets(ing)
+					store.syncSecrets(ing, "secret added")
 				}
 				updateCh.In() <- Event{
 					Type: CreateEvent,
@@ -378,6 +379,7 @@ func New(checkOCSP bool,
 			if !reflect.DeepEqual(old, cur) {
 				sec := cur.(*corev1.Secret)
 				key := k8s.MetaNamespaceKey(sec)
+				glog.Infof("secret %v was updated", key)
 
 				if store.defaultSSLCertificate == key {
 					store.syncSecret(store.defaultSSLCertificate)
@@ -393,7 +395,7 @@ func New(checkOCSP bool,
 							continue
 						}
 						store.extractAnnotations(ing)
-						store.syncSecrets(ing)
+						store.syncSecrets(ing, "secret updated")
 					}
 					updateCh.In() <- Event{
 						Type: UpdateEvent,
@@ -607,11 +609,13 @@ func objectRefAnnotationNsKey(ann string, ing *extensions.Ingress) (string, erro
 
 // syncSecrets synchronizes data from all Secrets referenced by the given
 // Ingress with the local store and file system.
-func (s k8sStore) syncSecrets(ing *extensions.Ingress) {
+func (s k8sStore) syncSecrets(ing *extensions.Ingress, reason string) {
+	glog.Infof("syncing all secrets ref'd by ing %s due to: %s", ing.Name, reason)
 	key := k8s.MetaNamespaceKey(ing)
 	for _, secrKey := range s.secretIngressMap.ReferencedBy(key) {
 		s.syncSecret(secrKey)
 	}
+	glog.Infof("finished syncing all secrets ref'd by ing %s", ing.Name)
 }
 
 // GetSecret returns the Secret matching key.
@@ -697,6 +701,7 @@ func (s k8sStore) GetServiceEndpoints(key string) (*corev1.Endpoints, error) {
 // GetAuthCertificate is used by the auth-tls annotations to get a cert from a secret
 func (s k8sStore) GetAuthCertificate(name string) (*resolver.AuthSSLCert, error) {
 	if _, err := s.GetLocalSSLCert(name); err != nil {
+		glog.Infof("GetAuthCertificate: syncing secret %v ", name)
 		s.syncSecret(name)
 	}
 

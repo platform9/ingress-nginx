@@ -687,6 +687,7 @@ type TemplateConfig struct {
 	DynamicConfigurationEnabled bool
 	DynamicCertificatesEnabled  bool
 	DisableLua                  bool
+	HttpOnlyIpv4BindAddressPrefix string
 }
 
 // ListenPorts describe the ports required to run the

@@ -591,6 +591,7 @@ func (n *NGINXController) OnUpdate(ingressCfg ingress.Configuration) error {
 		RedirectServers:             redirectServers,
 		IsSSLPassthroughEnabled:     n.cfg.EnableSSLPassthrough,
 		ListenPorts:                 n.cfg.ListenPorts,
+		HttpOnlyIpv4BindAddressPrefix: n.cfg.HttpOnlyIpv4BindAddressPrefix,
 		PublishService:              n.GetPublishService(),
 		DynamicConfigurationEnabled: n.cfg.DynamicConfigurationEnabled,
 		DynamicCertificatesEnabled:  n.cfg.DynamicCertificatesEnabled,
@@ -616,7 +617,7 @@ func (n *NGINXController) OnUpdate(ingressCfg ingress.Configuration) error {
 		return err
 	}
 
-	if glog.V(2) {
+	if glog.V(1) {
 		src, _ := ioutil.ReadFile(cfgPath)
 		if !bytes.Equal(src, content) {
 			tmpfile, err := ioutil.TempFile("", "new-nginx-cfg")

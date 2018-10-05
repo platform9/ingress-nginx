@@ -130,6 +130,9 @@ Requires the update-status parameter.`)
 		annotationsPrefix = flags.String("annotations-prefix", "nginx.ingress.kubernetes.io",
 			`Prefix of the Ingress annotations specific to the NGINX controller.`)
 
+		httpOnlyIpv4BindAddressPrefix = flags.String("http-only-ipv4-bindaddress-prefix", "",
+			`Optional IPV4 binding address prefix for http protocol, for e.g. 127.0.0.1:`)
+
 		enableSSLChainCompletion = flags.Bool("enable-ssl-chain-completion", true,
 			`Autocomplete SSL certificate chains with missing intermediate CA certificates.
 A valid certificate chain is required to enable OCSP stapling. Certificates
@@ -254,6 +257,7 @@ dynamic certificates functionality is enabled. Please check the flags --enable-s
 		UpdateStatusOnShutdown:      *updateStatusOnShutdown,
 		SortBackends:                *sortBackends,
 		UseNodeInternalIP:           *useNodeInternalIP,
+		HttpOnlyIpv4BindAddressPrefix: *httpOnlyIpv4BindAddressPrefix,
 		SyncRateLimit:               *syncRateLimit,
 		DynamicConfigurationEnabled: *dynamicConfigurationEnabled,
 		DisableLua:                  disableLua,

@@ -16,6 +16,9 @@ limitations under the License.
 
 package ingress
 
+import "fmt"
+import "time"
+
 // Equal tests for equality between two Configuration types
 func (c1 *Configuration) Equal(c2 *Configuration) bool {
 	if c1 == c2 {
@@ -263,7 +266,8 @@ func (s1 *Server) Equal(s2 *Server) bool {
 	if s1.SSLPassthrough != s2.SSLPassthrough {
 		return false
 	}
-	if !(&s1.SSLCert).Equal(&s2.SSLCert) {
+	eq, _ := (&s1.SSLCert).Equal(&s2.SSLCert)
+	if !eq {
 		return false
 	}
 	if s1.Alias != s2.Alias {
@@ -486,27 +490,36 @@ func (l4b1 *L4Backend) Equal(l4b2 *L4Backend) bool {
 }
 
 // Equal tests for equality between two SSLCert types
-func (s1 *SSLCert) Equal(s2 *SSLCert) bool {
+func (s1 *SSLCert) Equal(s2 *SSLCert) (bool,string) {
 	if s1 == s2 {
-		return true
+		return true, ""
 	}
-	if s1 == nil || s2 == nil {
-		return false
+	if s1 == nil {
+		return false, "s1 nil"
+	}
+	if s2 == nil {
+		return false, "s2 nil"
 	}
 	if s1.PemFileName != s2.PemFileName {
-		return false
+		return false, fmt.Sprintf("PemFileNames differ: %s != %s",
+			s1.PemFileName, s2.PemFileName)
 	}
 	if s1.PemSHA != s2.PemSHA {
-		return false
+		return false, fmt.Sprintf("PemSHAs differ: %s != %s",
+			s1.PemSHA, s2.PemSHA)
 	}
 	if !s1.ExpireTime.Equal(s2.ExpireTime) {
-		return false
+		return false, fmt.Sprintf("ExpireTimes differ: %s != %s",
+			s1.ExpireTime.Format(time.RFC3339),
+			s2.ExpireTime.Format(time.RFC3339))
 	}
 	if s1.FullChainPemFileName != s2.FullChainPemFileName {
-		return false
+		return false, fmt.Sprintf("FullChainPemFileNames differ: %s != %s",
+			s1.FullChainPemFileName, s2.FullChainPemFileName)
 	}
 	if s1.PemCertKey != s2.PemCertKey {
-		return false
+		return false, fmt.Sprintf("PemCertKeys differ: %s != %s",
+			s1.PemCertKey, s2.PemCertKey)
 	}
 
 	for _, cn1 := range s1.CN {
@@ -518,9 +531,9 @@ func (s1 *SSLCert) Equal(s2 *SSLCert) bool {
 			}
 		}
 		if !found {
-			return false
+			return false, "CNs differ"
 		}
 	}
 
-	return true
+	return true, ""
 }

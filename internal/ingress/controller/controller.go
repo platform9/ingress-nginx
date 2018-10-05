@@ -81,7 +81,7 @@ type Configuration struct {
 	SortBackends bool
 
 	ListenPorts *ngx_config.ListenPorts
-
+	HttpOnlyIpv4BindAddressPrefix string
 	EnableSSLPassthrough bool
 
 	EnableProfiling bool
