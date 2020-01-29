@@ -27,8 +27,6 @@ import (
 	"k8s.io/ingress-nginx/test/e2e/framework"
 )
 
-const defaultBackend = "default backend - 404"
-
 var _ = framework.IngressNginxDescribe("Default backend", func() {
 	f := framework.NewDefaultFramework("default-backend")
 
@@ -76,9 +74,9 @@ var _ = framework.IngressNginxDescribe("Default backend", func() {
 
 			switch test.Scheme {
 			case framework.HTTP:
-				cm = request.CustomMethod(test.Method, f.IngressController.HTTPURL)
+				cm = request.CustomMethod(test.Method, f.GetURL(framework.HTTP))
 			case framework.HTTPS:
-				cm = request.CustomMethod(test.Method, f.IngressController.HTTPSURL)
+				cm = request.CustomMethod(test.Method, f.GetURL(framework.HTTPS))
 				// the default backend uses a self generated certificate
 				cm.Transport = &http.Transport{
 					TLSClientConfig: &tls.Config{
@@ -94,8 +92,40 @@ var _ = framework.IngressNginxDescribe("Default backend", func() {
 			}
 
 			resp, _, errs := cm.End()
-			Expect(len(errs)).Should(BeNumerically("==", 0))
+			Expect(errs).Should(BeEmpty())
 			Expect(resp.StatusCode).Should(Equal(test.Status))
 		}
+	})
+
+	It("enables access logging for default backend", func() {
+		f.UpdateNginxConfigMapData("enable-access-log-for-default-backend", "true")
+
+		resp, _, errs := gorequest.New().
+			Get(f.GetURL(framework.HTTP)+"/somethingOne").
+			Set("Host", "foo").
+			End()
+
+		Expect(len(errs)).Should(Equal(0))
+		Expect(resp.StatusCode).Should(Equal(http.StatusNotFound))
+
+		logs, err := f.NginxLogs()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(logs).To(ContainSubstring("/somethingOne"))
+	})
+
+	It("disables access logging for default backend", func() {
+		f.UpdateNginxConfigMapData("enable-access-log-for-default-backend", "false")
+
+		resp, _, errs := gorequest.New().
+			Get(f.GetURL(framework.HTTP)+"/somethingTwo").
+			Set("Host", "bar").
+			End()
+
+		Expect(len(errs)).Should(Equal(0))
+		Expect(resp.StatusCode).Should(Equal(http.StatusNotFound))
+
+		logs, err := f.NginxLogs()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(logs).ToNot(ContainSubstring("/somethingTwo"))
 	})
 })

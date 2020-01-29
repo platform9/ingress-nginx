@@ -24,10 +24,11 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	appsv1beta1 "k8s.io/api/apps/v1beta1"
-	extensions "k8s.io/api/extensions/v1beta1"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
+	networking "k8s.io/api/networking/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 
 	"k8s.io/ingress-nginx/test/e2e/framework"
 )
@@ -37,25 +38,15 @@ var _ = framework.IngressNginxDescribe("Dynamic Certificate", func() {
 	host := "foo.com"
 
 	BeforeEach(func() {
-		err := enableDynamicCertificates(f.IngressController.Namespace, f.KubeClientSet)
-		Expect(err).NotTo(HaveOccurred())
-
-		err = f.WaitForNginxConfiguration(
-			func(cfg string) bool {
-				return strings.Contains(cfg, "ok, res = pcall(require, \"certificate\")")
-			})
-		Expect(err).NotTo(HaveOccurred())
-
-		err = f.NewEchoDeploymentWithReplicas(1)
-		Expect(err).NotTo(HaveOccurred())
+		f.NewEchoDeploymentWithReplicas(1)
 	})
 
 	It("picks up the certificate when we add TLS spec to existing ingress", func() {
-		ensureIngress(f, host)
+		ensureIngress(f, host, framework.EchoService)
 
-		ing, err := f.KubeClientSet.ExtensionsV1beta1().Ingresses(f.IngressController.Namespace).Get(host, metav1.GetOptions{})
+		ing, err := f.KubeClientSet.NetworkingV1beta1().Ingresses(f.Namespace).Get(host, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
-		ing.Spec.TLS = []extensions.IngressTLS{
+		ing.Spec.TLS = []networking.IngressTLS{
 			{
 				Hosts:      []string{host},
 				SecretName: host,
@@ -66,19 +57,28 @@ var _ = framework.IngressNginxDescribe("Dynamic Certificate", func() {
 			ing.Spec.TLS[0].SecretName,
 			ing.Namespace)
 		Expect(err).ToNot(HaveOccurred())
-		_, err = f.KubeClientSet.ExtensionsV1beta1().Ingresses(f.IngressController.Namespace).Update(ing)
+		_, err = f.KubeClientSet.NetworkingV1beta1().Ingresses(f.Namespace).Update(ing)
 		Expect(err).ToNot(HaveOccurred())
 		time.Sleep(waitForLuaSync)
 
-		ensureHTTPSRequest(f.IngressController.HTTPSURL, host, host)
+		ensureHTTPSRequest(f.GetURL(framework.HTTPS), host, host)
 	})
 
 	It("picks up the previously missing secret for a given ingress without reloading", func() {
-		ing, err := f.EnsureIngress(framework.NewSingleIngressWithTLS(host, "/", host, f.IngressController.Namespace, "http-svc", 80, nil))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(ing).NotTo(BeNil())
+		ing := framework.NewSingleIngressWithTLS(host, "/", host, []string{host}, f.Namespace, framework.EchoService, 80, nil)
+		f.EnsureIngress(ing)
+
 		time.Sleep(waitForLuaSync)
-		ensureHTTPSRequest(fmt.Sprintf("%s?id=dummy_log_splitter_foo_bar", f.IngressController.HTTPSURL), host, "ingress.local")
+
+		ip := f.GetNginxPodIP()
+		mf, err := f.GetMetric("nginx_ingress_controller_success", ip[0])
+		Expect(err).ToNot(HaveOccurred())
+		Expect(mf).ToNot(BeNil())
+
+		rc0, err := extractReloadCount(mf)
+		Expect(err).ToNot(HaveOccurred())
+
+		ensureHTTPSRequest(fmt.Sprintf("%s?id=dummy_log_splitter_foo_bar", f.GetURL(framework.HTTPS)), host, "ingress.local")
 
 		_, err = framework.CreateIngressTLSSecret(f.KubeClientSet,
 			ing.Spec.TLS[0].Hosts,
@@ -86,43 +86,35 @@ var _ = framework.IngressNginxDescribe("Dynamic Certificate", func() {
 			ing.Namespace)
 		Expect(err).ToNot(HaveOccurred())
 
-		By("configuring certificate_by_lua and skipping Nginx configuration of the new certificate")
-		err = f.WaitForNginxServer(host,
-			func(server string) bool {
-				return strings.Contains(server, "ssl_certificate_by_lua_block") &&
-					!strings.Contains(server, fmt.Sprintf("ssl_certificate /etc/ingress-controller/ssl/%s-%s.pem;", ing.Namespace, host)) &&
-					!strings.Contains(server, fmt.Sprintf("ssl_certificate_key /etc/ingress-controller/ssl/%s-%s.pem;", ing.Namespace, host)) &&
-					strings.Contains(server, "listen 443")
-			})
-		Expect(err).ToNot(HaveOccurred())
-
 		time.Sleep(waitForLuaSync)
 
 		By("serving the configured certificate on HTTPS endpoint")
-		ensureHTTPSRequest(f.IngressController.HTTPSURL, host, host)
+		ensureHTTPSRequest(f.GetURL(framework.HTTPS), host, host)
 
 		log, err := f.NginxLogs()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(log).ToNot(BeEmpty())
-		index := strings.Index(log, "id=dummy_log_splitter_foo_bar")
-		restOfLogs := log[index:]
 
 		By("skipping Nginx reload")
-		Expect(restOfLogs).ToNot(ContainSubstring(logRequireBackendReload))
-		Expect(restOfLogs).ToNot(ContainSubstring(logBackendReloadSuccess))
-		Expect(restOfLogs).To(ContainSubstring(logSkipBackendReload))
+		mf, err = f.GetMetric("nginx_ingress_controller_success", ip[0])
+		Expect(err).ToNot(HaveOccurred())
+		Expect(mf).ToNot(BeNil())
+
+		rc1, err := extractReloadCount(mf)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(rc0).To(BeEquivalentTo(rc1))
 	})
 
 	Context("given an ingress with TLS correctly configured", func() {
 		BeforeEach(func() {
-			ing, err := f.EnsureIngress(framework.NewSingleIngressWithTLS(host, "/", host, f.IngressController.Namespace, "http-svc", 80, nil))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ing).NotTo(BeNil())
+			ing := f.EnsureIngress(framework.NewSingleIngressWithTLS(host, "/", host, []string{host}, f.Namespace, framework.EchoService, 80, nil))
+
 			time.Sleep(waitForLuaSync)
 
-			ensureHTTPSRequest(f.IngressController.HTTPSURL, host, "ingress.local")
+			ensureHTTPSRequest(f.GetURL(framework.HTTPS), host, "ingress.local")
 
-			_, err = framework.CreateIngressTLSSecret(f.KubeClientSet,
+			_, err := framework.CreateIngressTLSSecret(f.KubeClientSet,
 				ing.Spec.TLS[0].Hosts,
 				ing.Spec.TLS[0].SecretName,
 				ing.Namespace)
@@ -130,47 +122,48 @@ var _ = framework.IngressNginxDescribe("Dynamic Certificate", func() {
 			time.Sleep(waitForLuaSync)
 
 			By("configuring certificate_by_lua and skipping Nginx configuration of the new certificate")
-			err = f.WaitForNginxServer(ing.Spec.TLS[0].Hosts[0],
+			f.WaitForNginxServer(ing.Spec.TLS[0].Hosts[0],
 				func(server string) bool {
-					return strings.Contains(server, "ssl_certificate_by_lua_block") &&
-						!strings.Contains(server, fmt.Sprintf("ssl_certificate /etc/ingress-controller/ssl/%s-%s.pem;", ing.Namespace, host)) &&
-						!strings.Contains(server, fmt.Sprintf("ssl_certificate_key /etc/ingress-controller/ssl/%s-%s.pem;", ing.Namespace, host)) &&
-						strings.Contains(server, "listen 443")
+					return strings.Contains(server, "listen 443")
 				})
-			Expect(err).ToNot(HaveOccurred())
 
 			time.Sleep(waitForLuaSync)
 
 			By("serving the configured certificate on HTTPS endpoint")
-			ensureHTTPSRequest(f.IngressController.HTTPSURL, host, host)
+			ensureHTTPSRequest(f.GetURL(framework.HTTPS), host, host)
+		})
+
+		/*
+			TODO(elvinefendi): this test currently does not work as expected
+			because Go transport code strips (https://github.com/golang/go/blob/431b5c69ca214ce4291f008c1ce2a50b22bc2d2d/src/crypto/tls/handshake_messages.go#L424)
+			trailing dot from SNI as suggest by the standard (https://tools.ietf.org/html/rfc6066#section-3).
+		*/
+		It("supports requests with domain with trailing dot", func() {
+			ensureHTTPSRequest(f.GetURL(framework.HTTPS), host+".", host)
 		})
 
 		It("picks up the updated certificate without reloading", func() {
-			ing, err := f.KubeClientSet.ExtensionsV1beta1().Ingresses(f.IngressController.Namespace).Get(host, metav1.GetOptions{})
+			ing, err := f.KubeClientSet.NetworkingV1beta1().Ingresses(f.Namespace).Get(host, metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
 
-			ensureHTTPSRequest(fmt.Sprintf("%s?id=dummy_log_splitter_foo_bar", f.IngressController.HTTPSURL), host, host)
+			ensureHTTPSRequest(fmt.Sprintf("%s?id=dummy_log_splitter_foo_bar", f.GetURL(framework.HTTPS)), host, host)
 
 			_, err = framework.CreateIngressTLSSecret(f.KubeClientSet,
 				ing.Spec.TLS[0].Hosts,
 				ing.Spec.TLS[0].SecretName,
 				ing.Namespace)
 			Expect(err).ToNot(HaveOccurred())
+
 			time.Sleep(waitForLuaSync)
 
 			By("configuring certificate_by_lua and skipping Nginx configuration of the new certificate")
-			err = f.WaitForNginxServer(ing.Spec.TLS[0].Hosts[0],
+			f.WaitForNginxServer(ing.Spec.TLS[0].Hosts[0],
 				func(server string) bool {
-					return strings.Contains(server, "ssl_certificate_by_lua_block") &&
-						!strings.Contains(server, fmt.Sprintf("ssl_certificate /etc/ingress-controller/ssl/%s-%s.pem;", ing.Namespace, host)) &&
-						!strings.Contains(server, fmt.Sprintf("ssl_certificate_key /etc/ingress-controller/ssl/%s-%s.pem;", ing.Namespace, host)) &&
-						strings.Contains(server, "listen 443")
+					return strings.Contains(server, "listen 443")
 				})
-			Expect(err).ToNot(HaveOccurred())
-
-			time.Sleep(waitForLuaSync)
 
 			By("serving the configured certificate on HTTPS endpoint")
-			ensureHTTPSRequest(f.IngressController.HTTPSURL, host, host)
+			ensureHTTPSRequest(f.GetURL(framework.HTTPS), host, host)
 
 			log, err := f.NginxLogs()
 			Expect(err).ToNot(HaveOccurred())
@@ -181,63 +174,58 @@ var _ = framework.IngressNginxDescribe("Dynamic Certificate", func() {
 			By("skipping Nginx reload")
 			Expect(restOfLogs).ToNot(ContainSubstring(logRequireBackendReload))
 			Expect(restOfLogs).ToNot(ContainSubstring(logBackendReloadSuccess))
-			Expect(restOfLogs).To(ContainSubstring(logSkipBackendReload))
 		})
 
 		It("falls back to using default certificate when secret gets deleted without reloading", func() {
-			ing, err := f.KubeClientSet.ExtensionsV1beta1().Ingresses(f.IngressController.Namespace).Get(host, metav1.GetOptions{})
+			ing, err := f.KubeClientSet.NetworkingV1beta1().Ingresses(f.Namespace).Get(host, metav1.GetOptions{})
 
-			ensureHTTPSRequest(fmt.Sprintf("%s?id=dummy_log_splitter_foo_bar", f.IngressController.HTTPSURL), host, host)
+			ensureHTTPSRequest(fmt.Sprintf("%s?id=dummy_log_splitter_foo_bar", f.GetURL(framework.HTTPS)), host, host)
 
-			f.KubeClientSet.CoreV1().Secrets(ing.Namespace).Delete(ing.Spec.TLS[0].SecretName, nil)
+			ip := f.GetNginxPodIP()
+			mf, err := f.GetMetric("nginx_ingress_controller_success", ip[0])
 			Expect(err).ToNot(HaveOccurred())
-			time.Sleep(waitForLuaSync)
+			Expect(mf).ToNot(BeNil())
 
-			By("configuring certificate_by_lua and skipping Nginx configuration of the new certificate")
-			err = f.WaitForNginxServer(ing.Spec.TLS[0].Hosts[0],
-				func(server string) bool {
-					return strings.Contains(server, "ssl_certificate_by_lua_block") &&
-						strings.Contains(server, "ssl_certificate /etc/ingress-controller/ssl/default-fake-certificate.pem;") &&
-						strings.Contains(server, "ssl_certificate_key /etc/ingress-controller/ssl/default-fake-certificate.pem;") &&
-						strings.Contains(server, "listen 443")
-				})
+			rc0, err := extractReloadCount(mf)
 			Expect(err).ToNot(HaveOccurred())
 
-			time.Sleep(waitForLuaSync)
+			err = f.KubeClientSet.CoreV1().Secrets(ing.Namespace).Delete(ing.Spec.TLS[0].SecretName, nil)
+			Expect(err).ToNot(HaveOccurred())
+
+			time.Sleep(waitForLuaSync * 2)
 
 			By("serving the default certificate on HTTPS endpoint")
-			ensureHTTPSRequest(f.IngressController.HTTPSURL, host, "ingress.local")
+			ensureHTTPSRequest(f.GetURL(framework.HTTPS), host, "ingress.local")
 
-			log, err := f.NginxLogs()
+			mf, err = f.GetMetric("nginx_ingress_controller_success", ip[0])
 			Expect(err).ToNot(HaveOccurred())
-			Expect(log).ToNot(BeEmpty())
-			index := strings.Index(log, "id=dummy_log_splitter_foo_bar")
-			restOfLogs := log[index:]
+			Expect(mf).ToNot(BeNil())
+
+			rc1, err := extractReloadCount(mf)
+			Expect(err).ToNot(HaveOccurred())
 
 			By("skipping Nginx reload")
-			Expect(restOfLogs).ToNot(ContainSubstring(logRequireBackendReload))
-			Expect(restOfLogs).ToNot(ContainSubstring(logBackendReloadSuccess))
-			Expect(restOfLogs).To(ContainSubstring(logSkipBackendReload))
+			Expect(rc0).To(BeEquivalentTo(rc1))
 		})
 
 		It("picks up a non-certificate only change", func() {
 			newHost := "foo2.com"
-			ing, err := f.KubeClientSet.ExtensionsV1beta1().Ingresses(f.IngressController.Namespace).Get(host, metav1.GetOptions{})
+			ing, err := f.KubeClientSet.NetworkingV1beta1().Ingresses(f.Namespace).Get(host, metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred())
 			ing.Spec.Rules[0].Host = newHost
-			_, err = f.KubeClientSet.ExtensionsV1beta1().Ingresses(f.IngressController.Namespace).Update(ing)
+			_, err = f.KubeClientSet.NetworkingV1beta1().Ingresses(f.Namespace).Update(ing)
 			Expect(err).ToNot(HaveOccurred())
 			time.Sleep(waitForLuaSync)
 
 			By("serving the configured certificate on HTTPS endpoint")
-			ensureHTTPSRequest(f.IngressController.HTTPSURL, newHost, "ingress.local")
+			ensureHTTPSRequest(f.GetURL(framework.HTTPS), newHost, "ingress.local")
 		})
 
 		It("removes HTTPS configuration when we delete TLS spec", func() {
-			ing, err := f.KubeClientSet.ExtensionsV1beta1().Ingresses(f.IngressController.Namespace).Get(host, metav1.GetOptions{})
+			ing, err := f.KubeClientSet.NetworkingV1beta1().Ingresses(f.Namespace).Get(host, metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred())
-			ing.Spec.TLS = []extensions.IngressTLS{}
-			_, err = f.KubeClientSet.ExtensionsV1beta1().Ingresses(f.IngressController.Namespace).Update(ing)
+			ing.Spec.TLS = []networking.IngressTLS{}
+			_, err = f.KubeClientSet.NetworkingV1beta1().Ingresses(f.Namespace).Update(ing)
 			Expect(err).ToNot(HaveOccurred())
 			time.Sleep(waitForLuaSync)
 
@@ -246,15 +234,14 @@ var _ = framework.IngressNginxDescribe("Dynamic Certificate", func() {
 	})
 })
 
-func enableDynamicCertificates(namespace string, kubeClientSet kubernetes.Interface) error {
-	return framework.UpdateDeployment(kubeClientSet, namespace, "nginx-ingress-controller", 1,
-		func(deployment *appsv1beta1.Deployment) error {
-			args := deployment.Spec.Template.Spec.Containers[0].Args
-			args = append(args, "--enable-dynamic-certificates")
-			args = append(args, "--enable-ssl-chain-completion=false")
-			deployment.Spec.Template.Spec.Containers[0].Args = args
-			_, err := kubeClientSet.AppsV1beta1().Deployments(namespace).Update(deployment)
+func extractReloadCount(mf *dto.MetricFamily) (float64, error) {
+	vec, err := expfmt.ExtractSamples(&expfmt.DecodeOptions{
+		Timestamp: model.Now(),
+	}, mf)
 
-			return err
-		})
+	if err != nil {
+		return 0, err
+	}
+
+	return float64(vec[0].Value), nil
 }
