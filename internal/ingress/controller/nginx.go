@@ -95,6 +95,7 @@ func NewNGINXController(config *Configuration, mc metric.Collector, fs file.File
 		}),
 
 		stopCh:   make(chan struct{}),
+		ngxErrCh: make(chan error),
 		updateCh: channels.NewRingChannel(1024),
 
 		stopLock: &sync.Mutex{},
@@ -284,7 +285,9 @@ func (n *NGINXController) Start() {
 	for {
 		select {
 		case err := <-n.ngxErrCh:
+			glog.Infof("received from ngxErrCh: %v", err)
 			if n.isShuttingDown {
+				glog.Infof("nginx exited: shutting down --ok")
 				break
 			}
 
@@ -293,7 +296,12 @@ func (n *NGINXController) Start() {
 			// reflected in the nginx configuration which can lead to confusion and report
 			// issues because of this behavior.
 			// To avoid this issue we restart nginx in case of errors.
-			if process.IsRespawnIfRequired(err) {
+			//
+			// If the process was killed with TERM, err is nil.
+			// Fow now, restart it in that situation as well (good for testing)
+			shouldRestart := err == nil || process.IsRespawnIfRequired(err)
+			if shouldRestart {
+				glog.Infof("nginx exited: respawn necessary")
 				process.WaitUntilPortIsAvailable(n.cfg.ListenPorts.HTTP)
 				// release command resources
 				cmd.Process.Release()
@@ -303,7 +311,13 @@ func (n *NGINXController) Start() {
 					Setpgid: true,
 					Pgid:    0,
 				}
+				// clear the runningConfig to ensure a full sync of Lua backend
+				n.runningConfig = new(ingress.Configuration)
 				n.start(cmd)
+				// Schedule resync
+				n.syncQueue.EnqueueTask(task.GetDummyObject("restart-sync"))
+			} else {
+				glog.Infof("nginx exited: respawn not required, err was: %v", err)
 			}
 		case event := <-n.updateCh.Out():
 			if n.isShuttingDown {
@@ -376,9 +390,12 @@ func (n *NGINXController) start(cmd *exec.Cmd) {
 		n.ngxErrCh <- err
 		return
 	}
-
+	glog.Infof("started child process: %v", cmd.Path)
 	go func() {
-		n.ngxErrCh <- cmd.Wait()
+		err := cmd.Wait()
+		glog.Infof("child process exited with: %v", err)
+		n.ngxErrCh <- err
+		glog.Infof("sent error to channel")
 	}()
 }
 
